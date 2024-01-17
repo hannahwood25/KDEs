@@ -1,0 +1,343 @@
+#### Kittiwake KDAs
+
+# process
+# step 1: choose which tracks to analyse (species, island, length etc)
+# step 2: make KDEs for all individuals
+# step 3: export saved KDEs 
+# step 4a: train HMMs on whole colony and then apply to individuals (justification - scale paramaters of KDEs based on long tracks from whole colony)
+# step 4b: create KDEs for each behavior for each individual
+# step 4c: export shape files of behavioral KDEs
+# step 5: compare percentage overlap of individuals
+
+
+## read through paper, KDE help files, and Alice's code
+## send Kittiwake_PUF_KDE_innerBuff5_returnBuff20_dur1 to Rob
+
+# ~/Desktop/R 5 sep/Chapter_3_HMMs_vs_Sample_AllColonies_5sep.R
+
+setwd("/Users/hannahwood/Desktop/R 5 sep")
+
+library(track2KBA) # load package
+library(tidyverse)
+library(moveHMM)
+# Load library for multiple plots
+library(patchwork)
+library(terra)
+library(readr)
+
+FAME_CombinedBLKI_wTripIDs <- read_csv("/Users/hannahwood/Desktop/OMGPhD/PhD data/FAME_CombinedBLKI_wTripIDs.csv")
+View(FAME_CombinedBLKI_wTripIDs)
+
+kitt <- FAME_CombinedBLKI_wTripIDs
+
+
+kitt_colony = kitt %>%
+  group_by(Site) %>%
+  filter(TripID == "COLONY") %>%
+  summarise(Latitude = mean(Latitude),
+            Longitude = mean(Longitude))
+#write.csv(colonies_more_than_10, "colony_data_summ.csv")
+
+colonies_more_than_8 = read.csv("colony_morethan8_summ.csv")
+
+### locate the colonies (get lat and long)
+kitt_colony = kitt %>%
+  dplyr::group_by(Site) %>%
+  dplyr::filter(TripID == "COLONY") %>%
+  dplyr::summarise(Latitude = mean(Latitude),
+                   Longitude = mean(Longitude))
+
+### Values from Alice's Oikos 2018 paper
+
+stepMean0 <- c(0.08, 0.27, 1) # step length means of 3 states
+stepSD0 <- c(0.05, 0.31, 0.35) # step length variance of 3 states
+stepPar0 <- c(stepMean0,stepSD0)
+
+angleMean0 <- c(0.00, 0.00, 0.00) # turning angle means of 3 states
+kappa0 <- c(14, 0.4, 6.8) # angle concentration
+anglePar0 <- c(angleMean0 ,kappa0)
+
+### parameters roughly describe sitting, foraging, flying.
+
+
+colonies_more_than_8 = subset(colonies_more_than_8, Site != "FAI")
+colonies_more_than_8 = subset(colonies_more_than_8, Site != "RAT")
+
+
+colony = colonies_more_than_8$Site[4]
+
+for (colony in colonies_more_than_8$Site) {
+  colony = gsub(":", "_", colony)
+  colony_long_trips_df = read.csv(paste0(colony, "_complete_trips.csv"))
+  colony_hVals = readRDS(paste0(colony, "_hVals.rds"))
+  
+  # here we know that the first points in the data set are from the colony center
+  colony_location <- kitt_colony %>% 
+    filter(Site == colony) %>%
+    dplyr::select(Latitude, Longitude)
+  
+  # SHOULD WE DO THIS? *
+  #colony_long_trips_df <- colony_long_trips_df[colony_long_trips_df$Dist2colony > 3, ] 
+  
+  colony_long_trips_moveHMM <- prepData(dplyr::select(colony_long_trips_df, ID, Latitude, Longitude),type="LL",coordNames=c("Longitude","Latitude"))
+  
+  n_zero_steps = sum(colony_long_trips_moveHMM$step == 0, na.rm = T)
+  
+  #saveRDS(colony_long_trips_moveHMM, paste0(colony, "_prep_data_", n_zero_steps, "_zero_steps.rds"))
+  
+  # CHECK THIS!!!!************
+  print(sprintf("****** Found and removed %d 0-step movements ******", n_zero_steps))
+  colony_long_trips_df = subset(colony_long_trips_df, colony_long_trips_moveHMM$step > 0)
+  colony_long_trips_moveHMM = subset(colony_long_trips_moveHMM, step > 0)
+  ######
+  
+  ## call to fitting function
+  # m_3 <- fitHMM(data=colony_long_trips_moveHMM,
+  #               nbStates=3,
+  #               stepPar0=stepPar0,
+  #               anglePar0=anglePar0,
+  #               formula = ~1,
+  #               verbose = 2)
+  # 
+  # saveRDS(m_3, paste0(colony, "_trainedHMM_3state.rds"))
+  m_3 = readRDS(paste0(colony, "_trainedHMM_3state.rds"))
+  
+  ### get info from model
+  #m_3
+  #plot(m_3, plotCI=TRUE, ask = FALSE, plotTracks = FALSE)
+  
+  # Given a model (that we like/works) we want to make decoded tracks for each individual
+  ## and then make KDEs of those behaviors
+  
+  ### we want to add the state as a column for each location/data point
+  
+  ### gives you list of assigned states in order but not attached to the daaframe
+  states <- viterbi(m_3)
+  
+  ### make a little table of prop time spent in diff states
+  props = prop.table(table(states))
+  
+  # Add states to original 'long' track dataframe
+  colony_long_trips_df$state = states
+  # Change 'ID" back to original ID (one per bird, not per trip)
+  colony_long_trips_df$ID = colony_long_trips_df$origID
+  
+  # Plot states
+  #ggplot(colony_long_trips_df, aes(x = Longitude, y = Latitude, color = factor(state))) + geom_point(alpha = 0.2)
+  
+  
+  # for (s in 1:3) {
+  #   # Extract just the points for state 1
+  #   colony_long_trips_df_state = subset(colony_long_trips_df, state == s)
+  #   # Plot
+  #   ggplot(colony_long_trips_df_state, aes(x = Longitude, y = Latitude)) + geom_point()
+  #   
+  #   ### reprojecting tracks into "azim" projection
+  #   colony_long_trips_df_state_azim <- projectTracks( dataGroup = colony_long_trips_df_state, projType = 'azim', custom=TRUE )
+  #   
+  # 
+  #   ### Create KDE for this behaviour
+  #   colony_KDE_state <- estSpaceUse(
+  #     tracks = colony_long_trips_df_state_azim, 
+  #     scale = colony_hVals$mag, 
+  #     res = 1,
+  #     levelUD = 50, 
+  #     polyOut = TRUE
+  #   )
+  #   
+  #   # Plot
+  #   mapKDE(KDE = colony_KDE_state$UDPolygons, colony = colony_location)
+  #   # Save
+  #   saveRDS(colony_KDE_state, paste0(colony, "_Kittiwake_KDE_state", s, "_Aliceprior1km.rds"))
+  # }
+  
+  # Calculate 'ALL' behavour KDE from sample of all behaviuor of size given by smallest behaviour
+  min_n = sum(colony_long_trips_df$state == as.numeric(which.min(props)))
+  
+  colony_long_trips_df_sample = sample_n(colony_long_trips_df, size = min_n)
+  colony_long_trips_df_sample_azim <- projectTracks( dataGroup = colony_long_trips_df_sample, projType = 'azim', custom=TRUE )
+  colony_KDE_sample <- estSpaceUse(
+    tracks = colony_long_trips_df_sample_azim, 
+    scale = colony_hVals$mag, 
+    res = 1,
+    levelUD = 50, 
+    polyOut = TRUE
+  )
+  mapKDE(KDE = colony_KDE_sample$UDPolygons, colony = colony_location)
+  
+  
+  
+  #saveRDS(colony_KDE_sample, paste0(colony, "_Kittiwake_KDE_SAMPLE_Aliceprior1km.rds"))
+  
+
+  
+  KDE_state1 = readRDS(paste0(colony, "_Kittiwake_KDE_state1_Aliceprior1km.rds"))
+  KDE_state2 = readRDS(paste0(colony, "_Kittiwake_KDE_state2_Aliceprior1km.rds"))
+  KDE_state3 = readRDS(paste0(colony, "_Kittiwake_KDE_state3_Aliceprior1km.rds"))
+  KDE_state_SAMPLE = readRDS(paste0(colony, "_Kittiwake_KDE_SAMPLE_Aliceprior1km.rds"))
+  
+  e1 = raster::extent(KDE_state1$UDPolygons)
+  e2 = raster::extent(KDE_state2$UDPolygons)
+  e3 = raster::extent(KDE_state3$UDPolygons)
+  e4 = raster::extent(KDE_state_SAMPLE$UDPolygons)
+  
+  min_lon = min(e1[1], e2[1], e3[1], e4[1])
+  max_lon = max(e1[2], e2[2], e3[2], e4[2])
+  min_lat = min(e1[3], e2[3], e3[3], e4[3])
+  max_lat = max(e1[4], e2[4], e3[4], e4[4])
+  
+  # Plot KDEs for state 1 (fixing lat/long range to be consistent across plots below)
+  p1 = ggplot(KDE_state1$UDPolygons) + 
+    geom_sf(aes(col = .data$id), fill = NA) + 
+    coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) + 
+    borders("world", colour = "black", fill = NA) + 
+    theme(legend.position = "none", 
+          panel.background = element_rect(fill = "white", colour = "black"),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1)) + 
+    ylab("Latitude") + xlab("Longitude") + 
+    ggtitle(paste0("A: ", format(100*props[1], digits = 4), "%"))
+  
+  # Plot KDEs for state 2 (fixing lat/long range to be consistent across plots below)
+  p2 = ggplot(KDE_state2$UDPolygons) + 
+    geom_sf(aes(col = .data$id), fill = NA) + 
+    coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) + 
+    borders("world", colour = "black", fill = NA)+ 
+    theme(legend.position = "none", 
+          panel.background = element_rect(fill = "white", colour = "black"),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1)) + 
+    ylab("Latitude") + xlab("Longitude")+ 
+    ggtitle(paste0("B: ", format(100*props[2], digits = 4), "%"))
+  
+  
+  # Plot KDEs for state 3 (fixing lat/long range to be consistent across plots below)
+  p3 = ggplot(KDE_state3$UDPolygons) + 
+    geom_sf(aes(col = .data$id), fill = NA) + 
+    coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) + 
+    borders("world", colour = "black", fill = NA) + 
+    theme(legend.position = "none", 
+          panel.background = element_rect(fill = "white", colour = "black"),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1)) + 
+    ylab("Latitude") + xlab("Longitude")+ 
+    ggtitle(paste0("C: ", format(100*props[3], digits = 4), "%"))
+              
+  
+  # Plot KDEs for state 3 (fixing lat/long range to be consistent across plots below)
+  p3_sample = ggplot(KDE_state_SAMPLE$UDPolygons) + 
+    geom_sf(aes(col = .data$id), fill = NA) + 
+    coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) + 
+    borders("world", colour = "black", fill = NA) + 
+    theme(legend.position = "none", 
+          panel.background = element_rect(fill = "white", colour = "black"),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1)) + 
+    ylab("Latitude") + xlab("Longitude")+ 
+    ggtitle(paste0("Sample: ", format(100*min(props), digits = 4), "%"))
+  
+  # Combine into three column plot                                                           
+  p1 + p2 + p3 + p3_sample
+  #ggsave(paste0(colony, "_behavioural_KDEs_3State_Kittiwakes_Aliceprior1km.pdf"), width = 12, height = 6)
+  
+  
+  # Load sample 'All' KDE object 
+  colony_KDE_all = readRDS(paste0(colony, "_Kittiwake_KDE_innerBuff0p5_returnBuff2_dur1_1km.rds"))
+  
+  # Make fourth plot of all KDE
+  p4 = ggplot(colony_KDE_all$UDPolygons) + 
+    geom_sf(aes(col = .data$id), fill = NA) + 
+    coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) + 
+    borders("world", colour = "black", fill = NA) + 
+    theme(legend.position = "none", 
+          panel.background = element_rect(fill = "white", colour = "black"),
+          panel.border = element_rect(colour = "black", fill = NA, size = 1)) + 
+    ylab("Latitude") + xlab("Longitude")+ 
+    ggtitle("All")
+  
+  # Make a plot with three columns for each behaviour with 'all' plot beneath each
+  p4 + (p1 + p2 + p3 + p3_sample + plot_layout(nrow = 2, ncol = 2)) + plot_layout(ncol = 2)
+  #ggsave(paste0(colony, "_behavioural_KDEs_3State_Kittiwakes_vsALL_Aliceprior1km.pdf"), width = 12, height = 8, scale = 1.2)
+  
+  
+  # Make a plot with three columns for each behaviour with 'all' plot beneath each
+  p4 + p1 + p2 + p3 + p3_sample
+  #ggsave(paste0(colony, "_all_KDEs.pdf"), width = 12, height = 8, scale = 1.2)
+  
+  
+  # colony = colonies_more_than_10$Site[1] does anlysis in loop for just first colony
+  # colony = colonies_more_than_10$Site[4] does analysis for FIL which is a colony with a small sample size
+  
+  pot_site_1 <- findSite(
+    KDE_state1$KDE.Surface, represent = 90, levelUD = 50, polyOut = TRUE)
+  pot_site_2 <- findSite(
+    KDE_state2$KDE.Surface, represent = 90, levelUD = 50, polyOut = TRUE)
+  pot_site_3 <- findSite(
+    KDE_state3$KDE.Surface, represent = 90, levelUD = 50, polyOut = TRUE)
+  pot_site_SAMPLE <- findSite(
+    KDE_state_SAMPLE$KDE.Surface, represent = 90, levelUD = 50, polyOut = TRUE)
+  
+  
+  pot_site_ALL_90 = findSite(
+    colony_KDE_all$KDE.Surface, represent = 90, levelUD = 50, polyOut = TRUE)
+  plot(pot_site_ALL_90)
+  pot_site_ALL_80 = findSite(
+    colony_KDE_all$KDE.Surface, represent = 80, levelUD = 50, polyOut = TRUE)
+  plot(pot_site_ALL_80)
+  pot_site_ALL_70 = findSite(
+    colony_KDE_all$KDE.Surface, represent = 70, levelUD = 50, polyOut = TRUE, popSize = 10000)
+  plot(pot_site_ALL_70)
+  pot_site_ALL_60 = findSite(
+    colony_KDE_all$KDE.Surface, represent = 60, levelUD = 50, polyOut = TRUE)
+  plot(pot_site_ALL_60)
+  pot_site_ALL_50 = findSite(
+    colony_KDE_all$KDE.Surface, represent = 50, levelUD = 50, polyOut = TRUE)
+  plot(pot_site_ALL_50)
+  pot_site_ALL_40 = findSite(
+    colony_KDE_all$KDE.Surface, represent = 40, levelUD = 50, polyOut = TRUE)
+  plot(pot_site_ALL_40)
+  
+  
+  readRDS("BEM_hVals.rds")
+ ### Code to create potential sites from the representativeness
+  
+  pot_site_ALL = findSite(
+    colony_KDE_all$KDE.Surface, represent = 90, levelUD = 50, polyOut = TRUE)
+  pot_site_1 <- findSite(
+    KDE_state1$KDE.Surface, represent = 90, levelUD = 50, polyOut = TRUE)
+  pot_site_2 <- findSite(
+    KDE_state2$KDE.Surface, represent = 90, levelUD = 50, polyOut = TRUE)
+  pot_site_3 <- findSite(
+    KDE_state3$KDE.Surface, represent = 90, levelUD = 50, polyOut = TRUE)
+  pot_site_SAMPLE <- findSite(
+    KDE_state_SAMPLE$KDE.Surface, represent = 90, levelUD = 50, polyOut = TRUE)
+
+  
+  # Important! Avoids error in mapSite
+  sf::sf_use_s2(FALSE)
+  
+  #map1 = mapSite(pot_site_1)
+  #map2 = mapSite(pot_site_2)
+  #map3 = mapSite(pot_site_3)
+  #map_SAMPLE = mapSite(pot_site_SAMPLE)
+  #map_ALL = mapSite(pot_site_ALL)
+  
+  # Subsample to just those areas inside the potential site
+  # Convert to 'vect' so we can quickly calculate area of each site using 'terra's 'expanse' function
+  # Sum the areas to give total area of site
+  ## MUST GET TERRA open for this to work
+  
+  area1 = sum(expanse(vect(subset(pot_site_1, potentialSite == TRUE)), unit = "km"))
+  area2 = sum(expanse(vect(subset(pot_site_2, potentialSite == TRUE)), unit = "km"))
+  area3 = sum(expanse(vect(subset(pot_site_3, potentialSite == TRUE)), unit = "km"))
+  area_SAMPLE = sum(expanse(vect(subset(pot_site_SAMPLE, potentialSite == TRUE)), unit = "km"))
+  area_ALL = sum(expanse(vect(subset(pot_site_ALL, potentialSite == TRUE)), unit = "km"))
+
+  
+  areas_90_test = data.frame(colony = colony, 
+                     represent = 90, 
+                     levelUD = 50,
+                     area1 = area1, 
+                     area2 = area2, 
+                     area3 = area3, 
+                     area_SAMPLE = area_SAMPLE, 
+                     area_ALL = area_ALL)
+  
+  write.csv(areas_90_test, paste0(colony, "_Kittiwake_KDE_AREAS_Aliceprior1km.csv"))
+ 
